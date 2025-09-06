@@ -3,14 +3,13 @@ name: ci-neon
 on:
   workflow_dispatch:
   schedule:
-    # Uwaga: GitHub cron jest w UTC. 02:30 UTC ~ 04:30 czasu PL (CEST).
+    # codziennie o 02:30 UTC (04:30 czasu PL w lecie)
     - cron: "30 2 * * *"
 
 jobs:
   migrate-test-snapshot:
     runs-on: ubuntu-latest
-    env:
-      NEON_CS_URL: ${{ secrets.NEON_CS_URL }}
+
     steps:
       - uses: actions/checkout@v4
 
@@ -25,32 +24,32 @@ jobs:
 
       - name: Show DB target (masked)
         run: |
-          echo "Target: ${NEON_CS_URL%:*/*}/* (masked)"
+          echo "Target (psql): ${NEON_CS_URL%:*/*}/*"
+        env:
+          NEON_CS_URL: ${{ secrets.NEON_CS_URL }}
 
       - name: Make migration script executable
         run: chmod +x ./scripts/psql-migrate.sh
 
       - name: Run migrations on Neon
         run: ./scripts/psql-migrate.sh "$NEON_CS_URL"
-
-      # (opcjonalnie) seed dodatkowy na dany dzień — jeśli chcesz nadpisać dane
-      # - name: (Optional) Re-seed daily
-      #   run: psql "$NEON_CS_URL" -v "ON_ERROR_STOP=1" -f ./db/catering_seed_postgres.sql
+        env:
+          NEON_CS_URL: ${{ secrets.NEON_CS_URL }}
 
       - name: Build solution
         run: dotnet build catering-backend.sln -c Release --no-restore
 
-      - name: Unit tests
+      - name: Run Unit tests
         run: dotnet test ./tests/Unit -c Release
 
-      - name: Integration tests (Neon)
+      - name: Run Integration tests (Neon)
         env:
-          ConnectionStrings__Default: ${{ env.NEON_CS_URL }}
+          ConnectionStrings__Default: ${{ secrets.NEON_CS }}
         run: dotnet test ./tests/Integration -c Release
 
-      - name: E2E tests (Neon)
+      - name: Run E2E tests (Neon)
         env:
-          ConnectionStrings__Default: ${{ env.NEON_CS_URL }}
+          ConnectionStrings__Default: ${{ secrets.NEON_CS }}
         run: dotnet test ./tests/E2E -c Release
 
       - name: Snapshot (pg_dump custom format)
@@ -59,6 +58,8 @@ jobs:
           F="neon_snapshot_${TIMESTAMP}.dump"
           pg_dump --no-owner --if-exists -Fc "$NEON_CS_URL" -f "$F"
           echo "SNAPSHOT_FILE=$F" >> $GITHUB_ENV
+        env:
+          NEON_CS_URL: ${{ secrets.NEON_CS_URL }}
 
       - name: Upload snapshot artifact
         uses: actions/upload-artifact@v4
