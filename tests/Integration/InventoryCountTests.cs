@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading.Tasks;
 using Npgsql;
 using Xunit;
@@ -25,7 +26,9 @@ public class InventoryCountTests
 
         // 0) Parametry testu
         var countId = Guid.NewGuid();
-        var locId   = (Guid)(await ExecScalarAsync(con, tx, "SELECT location_id FROM locations LIMIT 1"))!;
+
+        var locIdObj = await ExecScalarAsync(con, tx, "SELECT location_id FROM locations LIMIT 1");
+        var locId = AsGuid(locIdObj);
 
         // 0.1) Upewnij się, że mamy co liczyć (jeśli nie ma partii w seedzie)
         await EnsureBatchExistsAsync(con, tx, CarrotId, qty: 20.000m, expiryDays: 7, lotPrefix: "MAR");
@@ -135,39 +138,71 @@ WHERE count_id=@count_id
 ORDER BY product_name;", new() { { "count_id", countId } });
 
         Assert.Contains(shrinkRows, r =>
-            (Guid)r["product_id"] == PotatoId && (decimal)r["variance_qty"] < 0m);
+            AsGuid(r["product_id"]) == PotatoId && AsDecimal(r["variance_qty"]) < 0m);
         Assert.DoesNotContain(shrinkRows, r =>
-            (Guid)r["product_id"] == CarrotId); // marchew to nadwyżka -> nie ma jej w widoku shrinkage
+            AsGuid(r["product_id"]) == CarrotId); // marchew to nadwyżka -> nie ma jej w widoku shrinkage
 
         // 4.2) Sumy w batches = counted_qty z linii dla obu produktów
-        var countedCarrot = (decimal)(await ExecScalarAsync(con, tx, @"
-SELECT counted_qty FROM inventory_count_lines WHERE count_id=@count_id AND product_id=@pid;", new() { { "count_id", countId }, { "pid", CarrotId } })!);
-        var countedPotato = (decimal)(await ExecScalarAsync(con, tx, @"
-SELECT counted_qty FROM inventory_count_lines WHERE count_id=@count_id AND product_id=@pid;", new() { { "count_id", countId }, { "pid", PotatoId } })!);
+        var countedCarrot = AsDecimal(await ExecScalarAsync(con, tx, @"
+SELECT counted_qty FROM inventory_count_lines WHERE count_id=@count_id AND product_id=@pid;", new() { { "count_id", countId }, { "pid", CarrotId } }));
 
-        var onHandCarrot = (decimal)(await ExecScalarAsync(con, tx, @"
-SELECT COALESCE(SUM(qty_on_hand),0) FROM batches WHERE product_id=@pid AND status='available';", new() { { "pid", CarrotId } })!);
-        var onHandPotato = (decimal)(await ExecScalarAsync(con, tx, @"
-SELECT COALESCE(SUM(qty_on_hand),0) FROM batches WHERE product_id=@pid AND status='available';", new() { { "pid", PotatoId } })!);
+        var countedPotato = AsDecimal(await ExecScalarAsync(con, tx, @"
+SELECT counted_qty FROM inventory_count_lines WHERE count_id=@count_id AND product_id=@pid;", new() { { "count_id", countId }, { "pid", PotatoId } }));
+
+        var onHandCarrot = AsDecimal(await ExecScalarAsync(con, tx, @"
+SELECT COALESCE(SUM(qty_on_hand),0) FROM batches WHERE product_id=@pid AND status='available';", new() { { "pid", CarrotId } }));
+
+        var onHandPotato = AsDecimal(await ExecScalarAsync(con, tx, @"
+SELECT COALESCE(SUM(qty_on_hand),0) FROM batches WHERE product_id=@pid AND status='available';", new() { { "pid", PotatoId } }));
 
         Assert.Equal(countedCarrot, onHandCarrot);
         Assert.Equal(countedPotato, onHandPotato);
 
         // 4.3) Powstały transakcje ADJUST (±)
-        var adjustCnt = (long)(await ExecScalarAsync(con, tx, @"
+        var adjustCnt = AsLong(await ExecScalarAsync(con, tx, @"
 SELECT COUNT(*) FROM inventory_transactions
-WHERE trx_type='ADJUST' AND occurred_at >= now() - interval '1 hour';", null)!)!;
+WHERE trx_type='ADJUST' AND occurred_at >= now() - interval '1 hour';", null));
         Assert.True(adjustCnt >= 1, "Brak transakcji ADJUST po postowaniu inwentaryzacji.");
 
         // Nie pozostawiamy zmian – test czyszczony rollbackiem
         await tx.RollbackAsync();
     }
 
-    // --- helpers ---
+    // --- helpers: konwersje bez CS8605 ---
+    private static Guid AsGuid(object? o)
+    {
+        if (o is Guid g) return g;
+        if (o is string s && Guid.TryParse(s, out var gs)) return gs;
+        throw new InvalidOperationException("Expected Guid, got: " + (o?.GetType().FullName ?? "null"));
+    }
+
+    private static decimal AsDecimal(object? o)
+    {
+        if (o is decimal d) return d;
+        if (o is double db) return (decimal)db;
+        if (o is float fl) return (decimal)fl;
+        if (o is long l) return l;
+        if (o is int i) return i;
+        if (o is string s && decimal.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var dec)) return dec;
+        throw new InvalidOperationException("Expected decimal, got: " + (o?.GetType().FullName ?? "null"));
+    }
+
+    private static long AsLong(object? o)
+    {
+        if (o is long l) return l;
+        if (o is int i) return i;
+        if (o is decimal d) return (long)d;
+        if (o is double db) return (long)db;
+        if (o is string s && long.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out var val)) return val;
+        throw new InvalidOperationException("Expected long, got: " + (o?.GetType().FullName ?? "null"));
+    }
+
+    // --- helpers: DB ---
     private static async Task EnsureBatchExistsAsync(NpgsqlConnection con, NpgsqlTransaction tx, Guid productId, decimal qty, int expiryDays, string lotPrefix)
     {
-        var count = (long)(await ExecScalarAsync(con, tx, "SELECT COUNT(*) FROM batches WHERE product_id=@pid AND status='available';",
-            new() { { "pid", productId } })!);
+        var countObj = await ExecScalarAsync(con, tx, "SELECT COUNT(*) FROM batches WHERE product_id=@pid AND status='available';",
+            new() { { "pid", productId } });
+        var count = AsLong(countObj);
         if (count == 0)
         {
             await ExecNonQueryAsync(con, tx, @"
@@ -181,7 +216,7 @@ VALUES (gen_random_uuid(), @pid, NULL, @lot, now(), current_date + @days, @qty, 
     {
         await using var cmd = new NpgsqlCommand(sql, con, tx);
         if (p != null) foreach (var kv in p) cmd.Parameters.AddWithValue(kv.Key, kv.Value ?? DBNull.Value);
-        var _ = await cmd.ExecuteNonQueryAsync();
+        _ = await cmd.ExecuteNonQueryAsync();
     }
 
     private static async Task<object?> ExecScalarAsync(NpgsqlConnection con, NpgsqlTransaction tx, string sql, Dictionary<string, object?>? p = null)
