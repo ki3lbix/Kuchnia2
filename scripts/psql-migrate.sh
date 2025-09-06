@@ -7,14 +7,14 @@ if [[ -z "$CS_URL" ]]; then
   exit 1
 fi
 
-# Utwórz tabelę historii migracji (idempotentnie)
+# 1) Tabela historii migracji (idempotentnie)
 psql "$CS_URL" -v "ON_ERROR_STOP=1" <<'SQL'
 CREATE TABLE IF NOT EXISTS schema_migrations (
-  id           serial primary key,
-  filename     text    not null unique,
-  sha256       text    not null,
-  applied_at   timestamptz not null default now(),
-  applied_by   text    not null default current_user
+  id         serial PRIMARY KEY,
+  filename   text NOT NULL UNIQUE,
+  sha256     text NOT NULL,
+  applied_at timestamptz NOT NULL DEFAULT now(),
+  applied_by text NOT NULL DEFAULT current_user
 );
 SQL
 
@@ -24,27 +24,30 @@ APPLIED=0
 
 for f in "$MIG_DIR"/*.sql; do
   base="$(basename "$f")"
-  # oblicz sha256 treści pliku
+
+  # 2) Oblicz sumę SHA-256 pliku (dla audytu i idempotencji)
   if command -v sha256sum >/dev/null 2>&1; then
     sum="$(sha256sum "$f" | awk '{print $1}')"
   else
     sum="$(shasum -a 256 "$f" | awk '{print $1}')"
   fi
 
-  # sprawdź, czy plik już zastosowany z tą samą sumą
-  EXISTS=$(psql "$CS_URL" -tA -v "ON_ERROR_STOP=1" \
-    -c "SELECT 1 FROM schema_migrations WHERE filename=$$${base}$$ AND sha256=$$${sum}$$ LIMIT 1;")
+  # 3) Sprawdź, czy dokładnie ten plik (ta sama suma) był już zastosowany
+  EXISTS="$(psql "$CS_URL" -tA -v "ON_ERROR_STOP=1" \
+    -v f="$base" -v s="$sum" \
+    -c "SELECT 1 FROM schema_migrations WHERE filename = :'f' AND sha256 = :'s' LIMIT 1;")"
+
   if [[ "$EXISTS" == "1" ]]; then
     echo "== Skipping already applied: $base"
     continue
   fi
 
   echo "== Applying: $base"
-  # transakcja per plik; ON_ERROR_STOP=1 — fail przy 1. błędzie
-  psql "$CS_URL" -v "ON_ERROR_STOP=1" <<SQL
+  # 4) Transakcja per plik + zapis do historii (z parametryzacją :'var')
+  psql "$CS_URL" -v "ON_ERROR_STOP=1" -v f="$base" -v s="$sum" <<SQL
 BEGIN;
 \i $f
-INSERT INTO schema_migrations(filename, sha256) VALUES ('$base', '$sum');
+INSERT INTO schema_migrations(filename, sha256) VALUES (:'f', :'s');
 COMMIT;
 SQL
 
