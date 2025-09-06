@@ -25,8 +25,9 @@ jobs:
         run: dotnet restore
       - name: Apply DB schema & seed
         run: |
-          pwsh ./scripts/psql-apply.ps1 -Conn "Host=localhost;Username=postgres;Password=postgres;Database=catering" -Sql ./db/catering_schema_postgres.sql
-          pwsh ./scripts/psql-apply.ps1 -Conn "Host=localhost;Username=postgres;Password=postgres;Database=catering" -Sql ./db/catering_seed_postgres.sql
+          pwsh -File ./scripts/psql-apply.ps1 -Conn "Host=localhost;Username=postgres;Password=postgres;Database=catering" -Sql ./db/catering_schema_postgres.sql
+          pwsh -File ./scripts/psql-apply.ps1 -Conn "Host=localhost;Username=postgres;Password=postgres;Database=catering" -Sql ./db/catering_seed_postgres.sql
+
       - name: Build
         run: dotnet build catering-backend.sln -c Release --no-restore
       - name: Unit tests
