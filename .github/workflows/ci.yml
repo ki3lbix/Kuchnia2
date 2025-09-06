@@ -1,0 +1,43 @@
+name: ci
+on:
+  push: { branches: [ main ] }
+  pull_request:
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: catering
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s --health-timeout=5s --health-retries=5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: '8.0.x' }
+      - name: Install psql
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Restore
+        run: dotnet restore
+      - name: Apply DB schema & seed
+        run: |
+          pwsh ./scripts/psql-apply.ps1 -Conn "Host=localhost;Username=postgres;Password=postgres;Database=catering" -Sql ./db/catering_schema_postgres.sql
+          pwsh ./scripts/psql-apply.ps1 -Conn "Host=localhost;Username=postgres;Password=postgres;Database=catering" -Sql ./db/catering_seed_postgres.sql
+      - name: Build
+        run: dotnet build catering-backend.sln -c Release --no-restore
+      - name: Unit tests
+        run: dotnet test ./tests/Unit -c Release /p:CollectCoverage=true /p:CoverletOutputFormat=cobertura
+      - name: Integration tests
+        env:
+          ConnectionStrings__Default: "Host=localhost;Username=postgres;Password=postgres;Database=catering"
+        run: dotnet test ./tests/Integration -c Release
+      - name: E2E tests
+        env:
+          ConnectionStrings__Default: "Host=localhost;Username=postgres;Password=postgres;Database=catering"
+        run: dotnet test ./tests/E2E -c Release
+      - name: Coverage (stub pass)
+        run: pwsh ./scripts/check-coverage.ps1 -MinCritical 0.9 -MinGlobal 0.8
