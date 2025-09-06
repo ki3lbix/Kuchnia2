@@ -1,0 +1,44 @@
+name: neon-day-sim
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 1-5"   # dni robocze 03:00 UTC
+
+jobs:
+  reset-and-simulate:
+    runs-on: ubuntu-latest
+    env:
+      NEON_CS_URL: ${{ secrets.NEON_CS_URL }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install psql
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      # Reset bazy do czystego stanu (szybka metoda: drop+recreate schema public)
+      - name: Reset schema
+        run: |
+          psql "$NEON_CS_URL" -v "ON_ERROR_STOP=1" -c "DROP SCHEMA public CASCADE; CREATE SCHEMA public; GRANT ALL ON SCHEMA public TO public;"
+
+      - name: Apply base schema
+        run: psql "$NEON_CS_URL" -v "ON_ERROR_STOP=1" -f ./db/catering_schema_postgres.sql
+
+      - name: Seed base data
+        run: psql "$NEON_CS_URL" -v "ON_ERROR_STOP=1" -f ./db/catering_seed_postgres.sql
+
+      # (Opcjonalnie) symulacja dnia — możesz tu dodać własny SQL lub odwołać się do testów
+      - name: Run E2E scenario as day simulation
+        env:
+          ConnectionStrings__Default: ${{ env.NEON_CS_URL }}
+        run: dotnet test ./tests/E2E -c Release
+
+      # (Opcjonalnie) dodatkowy skrypt symulacji (np. inwentaryzacja dnia)
+      # - name: Run extra day SQL
+      #   run: psql "$NEON_CS_URL" -v "ON_ERROR_STOP=1" -f ./db/simulate_day.sql
