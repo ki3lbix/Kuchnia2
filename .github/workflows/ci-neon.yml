@@ -1,9 +1,9 @@
-  name: ci-neon
+name: ci-neon
 
 on:
   workflow_dispatch:
   schedule:
-    # codziennie o 02:30 UTC (04:30 czasu PL w lecie)
+    # codziennie o 02:30 UTC (04:30 czasu PL)
     - cron: "30 2 * * *"
 
 jobs:
@@ -21,12 +21,6 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client
-
-      - name: Show DB target (masked)
-        run: |
-          echo "Target (psql): ${NEON_CS_URL%:*/*}/*"
-        env:
-          NEON_CS_URL: ${{ secrets.NEON_CS_URL }}
 
       - name: Make migration script executable
         run: chmod +x ./scripts/psql-migrate.sh
@@ -52,17 +46,14 @@ jobs:
           ConnectionStrings__Default: ${{ secrets.NEON_CS }}
         run: dotnet test ./tests/E2E -c Release
 
-    - name: Snapshot (pg_dump custom format)
-      run: |
-        TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
-        F="neon_snapshot_${TIMESTAMP}.dump"
-      # dump w formacie custom, bez właścicieli i bez zbędnych opcji
-      pg_dump --no-owner -Fc "$NEON_CS_URL" -f "$F"
-      echo "SNAPSHOT_FILE=$F" >> $GITHUB_ENV
-      env:
-        NEON_CS_URL: ${{ secrets.NEON_CS_URL }}
-
-    
+      - name: Snapshot (pg_dump custom format)
+        run: |
+          TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
+          F="neon_snapshot_${TIMESTAMP}.dump"
+          pg_dump --no-owner -Fc "$NEON_CS_URL" -f "$F"
+          echo "SNAPSHOT_FILE=$F" >> $GITHUB_ENV
+        env:
+          NEON_CS_URL: ${{ secrets.NEON_CS_URL }}
 
       - name: Upload snapshot artifact
         uses: actions/upload-artifact@v4
