@@ -1,0 +1,91 @@
+name: ci-neon
+
+on:
+  workflow_dispatch:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-test-neon:
+    runs-on: ubuntu-latest
+    env:
+      # Sekrety:
+      #  - NEON_CS_URL  -> URL do Twojej bazy Neon (production), np. postgresql://user:pass@ep-...pooler.../neondb?sslmode=require
+      #  - NEON_DB_NAME -> nazwa bazy "głównej" (np. neondb); użyjemy jej do CREATE DATABASE
+      BASE_CS_URL: ${{ secrets.NEON_CS_URL }}
+      BASE_DB: ${{ secrets.NEON_DB_NAME }}
+      # Nazwa izolowanej bazy per run/PR
+      ISOLATED_DB: ci_${{ github.run_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install psql client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Sanity check secrets
+        shell: bash
+        run: |
+          test -n "$BASE_CS_URL" || (echo "NEON_CS_URL not set" && exit 1)
+          test -n "$BASE_DB" || (echo "NEON_DB_NAME not set" && exit 1)
+
+      # ---- ISOLATION: create dedicated DB for this run ----
+      - name: Create isolated DB on Neon
+        shell: bash
+        env:
+          CS_URL: ${{ env.BASE_CS_URL }}
+          BASE_DB: ${{ env.BASE_DB }}
+          ISO_DB: ${{ env.ISOLATED_DB }}
+        run: |
+          echo "Creating database: $ISO_DB"
+          # Połącz się do bazy bazowej (np. neondb) i utwórz DB dla testów
+          psql "$CS_URL" -v "ON_ERROR_STOP=1" -c "CREATE DATABASE \"$ISO_DB\";"
+
+      - name: Enable uuid-ossp, apply schema & seed (isolated DB)
+        shell: bash
+        env:
+          # Podmień w URL nazwę bazy na izolowaną – prosty sed
+          CS_URL_ISO: ${{ env.BASE_CS_URL }}
+          ISO_DB: ${{ env.ISOLATED_DB }}
+        run: |
+          CS_URL_ISO="${CS_URL_ISO%/*}/$ISO_DB${CS_URL_ISO#*?}" || true
+          echo "Using isolated URL: ${CS_URL_ISO%:*/*}/* (masked)"
+          psql "$CS_URL_ISO" -v "ON_ERROR_STOP=1" -c 'CREATE EXTENSION IF NOT EXISTS "uuid-ossp";'
+          psql "$CS_URL_ISO" -v "ON_ERROR_STOP=1" -f ./db/catering_schema_postgres.sql
+          psql "$CS_URL_ISO" -v "ON_ERROR_STOP=1" -f ./db/catering_seed_postgres.sql
+          echo "CS_URL_ISO=$CS_URL_ISO" >> $GITHUB_ENV
+
+      - name: Build
+        run: dotnet build catering-backend.sln -c Release --no-restore
+
+      - name: Unit tests
+        run: dotnet test ./tests/Unit -c Release
+
+      - name: Integration tests (Neon isolated DB)
+        env:
+          ConnectionStrings__Default: ${{ env.CS_URL_ISO }}
+        run: dotnet test ./tests/Integration -c Release
+
+      - name: E2E tests (Neon isolated DB)
+        env:
+          ConnectionStrings__Default: ${{ env.CS_URL_ISO }}
+        run: dotnet test ./tests/E2E -c Release
+
+      # ---- CLEANUP: drop the isolated database no matter what ----
+      - name: Drop isolated DB
+        if: always()
+        shell: bash
+        env:
+          CS_URL: ${{ env.BASE_CS_URL }}
+          ISO_DB: ${{ env.ISOLATED_DB }}
+        run: |
+          echo "Dropping database: $ISO_DB"
+          # Terminate active connections, then DROP
+          psql "$CS_URL" -v "ON_ERROR_STOP=1" -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '$ISO_DB';"
+          psql "$CS_URL" -v "ON_ERROR_STOP=1" -c "DROP DATABASE IF EXISTS \"$ISO_DB\";"
