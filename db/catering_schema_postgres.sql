@@ -183,3 +183,43 @@ CREATE TABLE forecasts (
   model text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+-- ===== Inwentaryzacje (cycle counts) =====
+CREATE TYPE inv_count_status AS ENUM ('draft','in_progress','counted','posted','canceled');
+
+CREATE TABLE IF NOT EXISTS inventory_counts (
+  count_id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  location_id uuid NOT NULL REFERENCES locations(location_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  scope text NOT NULL CHECK (scope IN ('full','category','product','spot')),
+  scheduled_at timestamptz NOT NULL DEFAULT now(),
+  started_at timestamptz,
+  completed_at timestamptz,
+  status inv_count_status NOT NULL DEFAULT 'draft',
+  notes text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  created_by text
+);
+
+-- Pozycje liczenia – liczymy per produkt (opcjonalnie per partia, jeśli chcesz większą precyzję)
+CREATE TABLE IF NOT EXISTS inventory_count_lines (
+  count_line_id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  count_id uuid NOT NULL REFERENCES inventory_counts(count_id) ON UPDATE RESTRICT ON DELETE CASCADE,
+  product_id uuid NOT NULL REFERENCES products(product_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  -- stan teoretyczny na start liczenia:
+  book_qty numeric(12,3) NOT NULL,
+  -- suma po wszystkich partiach (jeśli liczysz po partiach, możesz dodać podtabelę szczegółową)
+  counted_qty numeric(12,3) NOT NULL DEFAULT 0 CHECK (counted_qty >= 0),
+  variance_qty numeric(12,3) NOT NULL DEFAULT 0,      -- counted - book
+  reason text,                                        -- np. 'waste','breakage','transfer','shrinkage'
+  notes text,
+  UNIQUE(count_id, product_id)
+);
+
+-- Opcjonalnie: szczegóły per partia, jeśli chcesz liczyć z lotami
+CREATE TABLE IF NOT EXISTS inventory_count_batches (
+  id uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  count_line_id uuid NOT NULL REFERENCES inventory_count_lines(count_line_id) ON UPDATE RESTRICT ON DELETE CASCADE,
+  batch_id uuid NOT NULL REFERENCES batches(batch_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  counted_qty numeric(12,3) NOT NULL CHECK (counted_qty >= 0),
+  UNIQUE(count_line_id, batch_id)
+);
