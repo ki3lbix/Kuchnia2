@@ -24,17 +24,15 @@ public class InventoryCountTests
 
         await using var tx = await con.BeginTransactionAsync(System.Data.IsolationLevel.Serializable);
 
-        // 0) Parametry testu
         var countId = Guid.NewGuid();
-
         var locIdObj = await ExecScalarAsync(con, tx, "SELECT location_id FROM locations LIMIT 1");
         var locId = AsGuid(locIdObj);
 
-        // 0.1) Upewnij się, że mamy co liczyć (jeśli nie ma partii w seedzie)
-        await EnsureBatchExistsAsync(con, tx, CarrotId, qty: 20.000m, expiryDays: 7, lotPrefix: "MAR");
-        await EnsureBatchExistsAsync(con, tx, PotatoId, qty: 50.000m, expiryDays: 20, lotPrefix: "ZIE");
+        // upewnij się, że mamy partie
+        await EnsureBatchExistsAsync(con, tx, CarrotId, 20.000m, 7, "MAR");
+        await EnsureBatchExistsAsync(con, tx, PotatoId, 50.000m, 20, "ZIE");
 
-        // 1) START inwentaryzacji (spot: marchew + ziemniaki)
+        // start inwentaryzacji
         await ExecNonQueryAsync(con, tx, @"
 INSERT INTO inventory_counts (count_id, location_id, scope, status, started_at, created_by)
 VALUES (@count_id, @loc_id, 'spot', 'in_progress', now(), 'test');
@@ -53,7 +51,7 @@ WHERE p.product_id = ANY(@prod_ids)
 GROUP BY p.product_id;
 ", new() { { "count_id", countId }, { "prod_ids", new[] { CarrotId, PotatoId } } });
 
-        // 2) WPROWADŹ wyniki liczenia: marchew +1.5, ziemniaki -2.0
+        // wpisanie wyników liczenia
         await ExecNonQueryAsync(con, tx, @"
 UPDATE inventory_count_lines
 SET counted_qty = book_qty + @plus,
@@ -72,9 +70,9 @@ SET counted_qty = GREATEST(book_qty - @minus,0),
 WHERE count_id=@count_id AND product_id=@prod_potato;
 ", new() { { "count_id", countId }, { "prod_potato", PotatoId }, { "minus", PotatoDeltaMinus } });
 
-        // 3) POSTING różnic (ADJUST ±) – FEFO po partiach – atomowo
+        // posting różnic (ubytki i nadwyżki)
         await ExecNonQueryAsync(con, tx, @"
--- UBYTKI (variance < 0)
+-- UBYTKI (variance < 0) – FEFO i transakcje w JEDNEJ instrukcji
 WITH neg AS (
   SELECT l.product_id, -l.variance_qty AS qty_to_issue
   FROM inventory_count_lines l
@@ -91,19 +89,21 @@ ordered AS (
 to_issue AS (
   SELECT product_id, batch_id,
          LEAST(qty_on_hand,
-               qty_to_issue - COALESCE(SUM(qty_on_hand) OVER (PARTITION BY product_id ORDER BY rn ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),0)
+               qty_to_issue - COALESCE(SUM(qty_on_hand) OVER (PARTITION BY product_id ORDER BY rn
+                 ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING),0)
               ) AS qty_issue
   FROM ordered
+),
+updated AS (
+  UPDATE batches bb
+  SET qty_on_hand = bb.qty_on_hand - ti.qty_issue
+  FROM to_issue ti
+  WHERE bb.batch_id = ti.batch_id AND ti.qty_issue > 0
+  RETURNING ti.batch_id, ti.qty_issue
 )
-UPDATE batches bb
-SET qty_on_hand = bb.qty_on_hand - ti.qty_issue
-FROM to_issue ti
-WHERE bb.batch_id = ti.batch_id AND ti.qty_issue > 0;
-
 INSERT INTO inventory_transactions(trx_id, batch_id, location_id, trx_type, qty, reason, created_by)
-SELECT gen_random_uuid(), ti.batch_id, @loc_id, 'ADJUST', -ti.qty_issue, 'inventory_shrinkage', 'inventory-post'
-FROM to_issue ti
-WHERE ti.qty_issue > 0;
+SELECT gen_random_uuid(), u.batch_id, @loc_id, 'ADJUST', -u.qty_issue, 'inventory_shrinkage', 'inventory-post'
+FROM updated u;
 
 -- NADWYŻKI (variance > 0)
 WITH pos AS (
@@ -128,9 +128,7 @@ SET status='posted', completed_at=now()
 WHERE count_id=@count_id;
 ", new() { { "count_id", countId }, { "loc_id", locId } });
 
-        // 4) ASERCJE
-
-        // 4.1) Raport shrinkage: powinien zawierać Ziemniaki (variance < 0), ale nie Marchew
+        // asercje
         var shrinkRows = await ReadRowsAsync(con, tx, @"
 SELECT product_id, product_name, variance_qty
 FROM vw_inventory_shrinkage
@@ -140,9 +138,8 @@ ORDER BY product_name;", new() { { "count_id", countId } });
         Assert.Contains(shrinkRows, r =>
             AsGuid(r["product_id"]) == PotatoId && AsDecimal(r["variance_qty"]) < 0m);
         Assert.DoesNotContain(shrinkRows, r =>
-            AsGuid(r["product_id"]) == CarrotId); // marchew to nadwyżka -> nie ma jej w widoku shrinkage
+            AsGuid(r["product_id"]) == CarrotId);
 
-        // 4.2) Sumy w batches = counted_qty z linii dla obu produktów
         var countedCarrot = AsDecimal(await ExecScalarAsync(con, tx, @"
 SELECT counted_qty FROM inventory_count_lines WHERE count_id=@count_id AND product_id=@pid;", new() { { "count_id", countId }, { "pid", CarrotId } }));
 
@@ -158,17 +155,15 @@ SELECT COALESCE(SUM(qty_on_hand),0) FROM batches WHERE product_id=@pid AND statu
         Assert.Equal(countedCarrot, onHandCarrot);
         Assert.Equal(countedPotato, onHandPotato);
 
-        // 4.3) Powstały transakcje ADJUST (±)
         var adjustCnt = AsLong(await ExecScalarAsync(con, tx, @"
 SELECT COUNT(*) FROM inventory_transactions
 WHERE trx_type='ADJUST' AND occurred_at >= now() - interval '1 hour';", null));
         Assert.True(adjustCnt >= 1, "Brak transakcji ADJUST po postowaniu inwentaryzacji.");
 
-        // Nie pozostawiamy zmian – test czyszczony rollbackiem
         await tx.RollbackAsync();
     }
 
-    // --- helpers: konwersje bez CS8605 ---
+    // helpers
     private static Guid AsGuid(object? o)
     {
         if (o is Guid g) return g;
@@ -197,7 +192,6 @@ WHERE trx_type='ADJUST' AND occurred_at >= now() - interval '1 hour';", null));
         throw new InvalidOperationException("Expected long, got: " + (o?.GetType().FullName ?? "null"));
     }
 
-    // --- helpers: DB ---
     private static async Task EnsureBatchExistsAsync(NpgsqlConnection con, NpgsqlTransaction tx, Guid productId, decimal qty, int expiryDays, string lotPrefix)
     {
         var countObj = await ExecScalarAsync(con, tx, "SELECT COUNT(*) FROM batches WHERE product_id=@pid AND status='available';",
