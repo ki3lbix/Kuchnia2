@@ -29,8 +29,8 @@ jobs:
           sudo apt-get install -y postgresql-client-17
 
           # sanity-check
-          pg_dump --version
-          psql --version
+          pg_dump-17 --version
+          psql -V
 
       - name: Make migration script executable
         run: chmod +x ./scripts/psql-migrate.sh
@@ -56,11 +56,11 @@ jobs:
           ConnectionStrings__Default: ${{ secrets.NEON_CS }}
         run: dotnet test ./tests/E2E -c Release
 
-      - name: Snapshot (pg_dump custom format)
+      - name: Snapshot (pg_dump 17 custom format)
         run: |
           TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
           F="neon_snapshot_${TIMESTAMP}.dump"
-          pg_dump --no-owner -Fc "$NEON_CS_URL" -f "$F"
+          pg_dump-17 --no-owner -Fc "$NEON_CS_URL" -f "$F"
           echo "SNAPSHOT_FILE=$F" >> $GITHUB_ENV
         env:
           NEON_CS_URL: ${{ secrets.NEON_CS_URL }}
