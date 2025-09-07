@@ -3,7 +3,7 @@ name: ci-neon
 on:
   workflow_dispatch:
   schedule:
-    # codziennie o 02:30 UTC (04:30 czasu PL)
+    # codziennie o 02:30 UTC (04:30 czasu PL w lecie)
     - cron: "30 2 * * *"
 
 jobs:
@@ -17,10 +17,20 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Install psql
+      - name: Install psql 17 (PGDG)
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-client
+          sudo apt-get install -y wget gnupg lsb-release
+          echo "deb [arch=amd64] http://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" | \
+            sudo tee /etc/apt/sources.list.d/pgdg.list
+          wget -qO- https://www.postgresql.org/media/keys/ACCC4CF8.asc | \
+            gpg --dearmor | sudo tee /etc/apt/trusted.gpg.d/postgresql.gpg > /dev/null
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-17
+
+          # sanity-check
+          pg_dump --version
+          psql --version
 
       - name: Make migration script executable
         run: chmod +x ./scripts/psql-migrate.sh
